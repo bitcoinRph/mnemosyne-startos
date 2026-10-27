@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mnemosyne-startos"
+version = "0.1.0"
+description = "StartOS wrapper for Mnemosyne: one port serving MCP Streamable HTTP, a REST API and a health check"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+# The mcp extra of mnemosyne-memory supplies starlette, uvicorn, anyio and httpx's
+# server-side peers; this package only adds the ASGI glue.
+dependencies = ["mnemosyne-memory[mcp]"]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "httpx>=0.27"]
+
+[project.scripts]
+mnemosyne-startos-server = "mnemosyne_startos.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["mnemosyne_startos*"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+testpaths = ["tests"]
