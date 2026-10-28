@@ -1,0 +1,123 @@
+name: StartOS package
+
+# Builds the StartOS package that lives in deploy/startos/. The package is a
+# subdirectory of this fork, so Start9's reusable build workflow cannot be
+# pointed at it; its setup-build-env action provides the toolchain instead.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/startos/**'
+      - 'mnemosyne/**'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - '.github/workflows/startos.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/startos/**'
+      - 'mnemosyne/**'
+      - 'pyproject.toml'
+      - 'setup.py'
+      - '.github/workflows/startos.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Install the fork and the StartOS server
+        run: pip install -e ".[mcp,test]" -e deploy/startos/server
+
+      - name: Run the StartOS server tests
+        working-directory: deploy/startos/server
+        env:
+          MNEMOSYNE_NO_EMBEDDINGS: '1'
+        run: pytest tests -v --tb=short
+
+  package-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: deploy/startos
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.14'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '26.13.0'
+          cache: npm
+          cache-dependency-path: deploy/startos/package-lock.json
+
+      - name: Install contract-test dependencies
+        run: |
+          python -m pip install pytest==9.2.0
+          npm ci
+
+      - name: Verify package and runtime contracts
+        run: python -m pytest tests/test_package_contracts.py -v --tb=short
+
+      - name: Verify token-store contracts
+        run: npm run test:contracts
+
+      - name: Type-check StartOS sources
+        run: npm run check
+
+  build:
+    needs: [server-tests, package-contracts]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86, runner: ubuntu-latest }
+          - { target: arm, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: deploy/startos
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - uses: Start9Labs/start-technologies/.github/actions/setup-build-env@master
+
+      # s9pk pack signs with the workspace key it finds walking up from the
+      # package directory; a CI checkout has none, so provision a throwaway one.
+      - name: Provision a workspace signing key
+        run: |
+          start-cli init-key
+          mkdir -p ../../.startos
+          cp ~/.startos/id.key.pem ../../.startos/build.key.pem
+
+      - run: npm ci
+
+      - run: make ${{ matrix.target }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mnemosyne_${{ matrix.target }}
+          path: deploy/startos/*.s9pk
+          if-no-files-found: error

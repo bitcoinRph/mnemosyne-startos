@@ -1,0 +1,20 @@
+{
+  "name": "mnemosyne-startos",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test:contracts": "tsx --test tests/store-schema.test.mts"
+  },
+  "dependencies": {
+    "@start9labs/start-sdk": "3.1.1"
+  },
+  "devDependencies": {
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
+  },
+  "allowScripts": {
+    "esbuild": true
+  },
+  "overrides": {
+    "@start9labs/start-sdk": "$@start9labs/start-sdk"
+  }
+}
