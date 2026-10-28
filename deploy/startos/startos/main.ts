@@ -58,13 +58,13 @@ export const main = sdk.setupMain(async ({ effects }) => {
       'mnemosyne-sub',
     ),
     exec: {
-      command: [
+      command: sdk.useEntrypoint([
         'mnemosyne-startos-server',
         '--host',
         '0.0.0.0',
         '--port',
         String(apiPort),
-      ],
+      ]),
       env: {
         MNEMOSYNE_MCP_TOKENS: JSON.stringify(tokens),
         MNEMOSYNE_MCP_ALLOWED_HOSTS: allowedHosts.join(','),

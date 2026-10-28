@@ -219,7 +219,7 @@ Diagnosis of client errors:
 The strategy is a wholesale copy of both volumes with `Backups.ofVolumes('main', 'startos')`. No database dump runs, so the SQLite files are copied as files.
 
 - Included: every bank database, the shared surface store, media blobs, `/data/home`, `/data/backups`, and `store.json` with all agent tokens.
-- MCP and REST file imports/exports accept only relative paths below `/data/backups`; traversal, absolute paths, links, and non-regular files are rejected.
+- MCP and REST file imports/exports accept only a flat filename directly beneath `/data/backups`; directories, traversal, absolute paths, links, and non-regular files are rejected.
 - Excluded: the image and the embedding model. They come from the package, not from a volume.
 - After restore: nothing is required. Tokens come back with `store.json`, so every agent keeps its current secret and URL settings. If the restored server has other enabled addresses, an agent that uses a disabled address gets `421`. Enable the address again to fix it.
 
@@ -233,7 +233,7 @@ The strategy is a wholesale copy of both volumes with `Backups.ofVolumes('main',
 6. Banks separate data and are not access control. Any valid token can read and write every bank, the shared surface store and the canonical profile. Canonical facts use one owner, `default`, for the whole server.
 7. A token is a full-access credential for one agent name. The package has no read-only token and no per-bank token.
 8. Author attribution is enforced. The author of a memory is the token name. A call that sets a different `author_id` gets `400`.
-9. `mnemosyne_export`, `mnemosyne_import` with `input_path`, and `mnemosyne_remember_media` with a local path read and write paths inside the subcontainer. `mnemosyne_remember_media` also needs `MNEMOSYNE_MEDIA_ALLOWED_PATHS`, which the package does not set. Provider imports (`hindsight`, `mem0`) need outbound network and an API key.
+9. `mnemosyne_export` and file-based `mnemosyne_import` accept only a flat filename directly beneath `/data/backups`. `mnemosyne_remember_media` with a local path reads inside the subcontainer and also needs `MNEMOSYNE_MEDIA_ALLOWED_PATHS`, which the package does not set. Provider imports (`hindsight`, `mem0`) need outbound network and an API key.
 10. The file import reads only the JSON that `mnemosyne_export` writes.
 11. Changing the token list or the enabled addresses restarts the service.
 12. Upstream is a beta release line. Behavior can change between versions, and the REST routes are specific to this package, not to upstream.

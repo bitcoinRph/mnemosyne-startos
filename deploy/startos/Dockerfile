@@ -42,7 +42,8 @@ COPY --chmod=0755 deploy/startos/docker-entrypoint.sh /usr/local/bin/mnemosyne-s
 
 RUN groupadd --gid 10001 mnemosyne \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent mnemosyne \
-    && install -d -o mnemosyne -g mnemosyne /data /data/backups /data/home /data/mnemosyne
+    && install -d -o root -g root -m 0755 /data \
+    && install -d -o mnemosyne -g mnemosyne -m 0750 /data/backups /data/home /data/mnemosyne
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \

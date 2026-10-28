@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import contextvars
-import errno
 import json
 import logging
 import os
@@ -45,6 +45,27 @@ _PUBLIC_PATHS = frozenset({"/healthz", "/openapi.json"})
 _BATCH_CLIENT_ERROR = "batch_validation_failed"
 
 
+def _startos_tool_definitions() -> list[dict[str, Any]]:
+    """Describe the StartOS file boundary without mutating upstream schemas."""
+    tools = copy.deepcopy(get_tool_definitions())
+    path_descriptions = {
+        "mnemosyne_export": (
+            "output_path",
+            "Flat filename to write directly beneath the StartOS backup directory",
+        ),
+        "mnemosyne_import": (
+            "input_path",
+            "Flat filename to read directly beneath the StartOS backup directory",
+        ),
+    }
+    for tool in tools:
+        replacement = path_descriptions.get(tool.get("name"))
+        if replacement is not None:
+            field, description = replacement
+            tool["input_schema"]["properties"][field]["description"] = description
+    return tools
+
+
 def _reject_symlink(path: Path) -> None:
     try:
         mode = path.lstat().st_mode
@@ -54,14 +75,20 @@ def _reject_symlink(path: Path) -> None:
         raise ValueError("backup path must not contain symlinked components or targets")
 
 
-def _backup_location(raw_path: Any) -> tuple[Path, Path]:
-    """Validate a caller path and return the configured root and relative path."""
+def _backup_location(raw_path: Any) -> tuple[Path, str]:
+    """Validate a flat filename directly beneath the configured backup root."""
     if not isinstance(raw_path, str) or not raw_path.strip():
-        raise ValueError("a relative backup path is required")
-    raw_path = raw_path.strip()
-    candidate = Path(raw_path)
-    if candidate.is_absolute() or any(part in {".", ".."} for part in raw_path.split("/")):
-        raise ValueError("backup path must be relative and must not contain traversal")
+        raise ValueError("a backup filename is required")
+    filename = raw_path.strip()
+    candidate = Path(filename)
+    if (
+        candidate.is_absolute()
+        or candidate.name != filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+    ):
+        raise ValueError("backup path must be a flat filename without directories")
 
     configured = os.environ.get("MNEMOSYNE_BACKUP_DIR", "").strip()
     if not configured:
@@ -78,37 +105,14 @@ def _backup_location(raw_path: Any) -> tuple[Path, Path]:
         _reject_symlink(current)
     root.mkdir(parents=True, exist_ok=True)
 
-    return root, candidate
+    return root, filename
 
 
-def _open_backup_parent(raw_path: Any, *, create: bool) -> tuple[Path, Path, int]:
-    """Open the target parent without following caller-controlled symlinks."""
-    root, candidate = _backup_location(raw_path)
+def _open_backup_directory(raw_path: Any) -> tuple[Path, str, int]:
+    """Open only the fixed backup directory without following symlinks."""
+    root, filename = _backup_location(raw_path)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    parent_fd = os.open(root, flags)
-    try:
-        for part in candidate.parts[:-1]:
-            try:
-                child_fd = os.open(part, flags, dir_fd=parent_fd)
-            except FileNotFoundError:
-                if not create:
-                    raise ValueError(
-                        "backup import path must name an existing regular file"
-                    ) from None
-                os.mkdir(part, mode=0o700, dir_fd=parent_fd)
-                child_fd = os.open(part, flags, dir_fd=parent_fd)
-            except OSError as exc:
-                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
-                    raise ValueError(
-                        "backup path must not contain symlinked components or targets"
-                    ) from None
-                raise
-            os.close(parent_fd)
-            parent_fd = child_fd
-        return root, candidate, parent_fd
-    except Exception:
-        os.close(parent_fd)
-        raise
+    return root, filename, os.open(root, flags)
 
 
 def _checked_leaf_stat(parent_fd: int, leaf: str, *, required: bool) -> os.stat_result | None:
@@ -130,13 +134,10 @@ def _checked_leaf_stat(parent_fd: int, leaf: str, *, required: bool) -> os.stat_
 
 
 def _safe_file_import(arguments: dict[str, Any]) -> dict[str, Any]:
-    root, candidate, parent_fd = _open_backup_parent(
-        arguments.get("input_path"), create=False
-    )
+    root, leaf, parent_fd = _open_backup_directory(arguments.get("input_path"))
     del root  # The open descriptors, not a re-resolved path, enforce confinement.
     input_fd = -1
     try:
-        leaf = candidate.name
         _checked_leaf_stat(parent_fd, leaf, required=True)
         input_fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
         info = os.fstat(input_fd)
@@ -152,13 +153,10 @@ def _safe_file_import(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _safe_file_export(arguments: dict[str, Any]) -> dict[str, Any]:
-    root, candidate, parent_fd = _open_backup_parent(
-        arguments.get("output_path"), create=True
-    )
+    root, leaf, parent_fd = _open_backup_directory(arguments.get("output_path"))
     temp_name = f".mnemosyne-export-{secrets.token_hex(16)}"
     temp_fd = -1
     try:
-        leaf = candidate.name
         _checked_leaf_stat(parent_fd, leaf, required=False)
         temp_fd = os.open(
             temp_name,
@@ -177,7 +175,7 @@ def _safe_file_export(arguments: dict[str, Any]) -> dict[str, Any]:
         os.replace(temp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         temp_name = ""
         if isinstance(result, dict) and result.get("path") == secured["output_path"]:
-            result = {**result, "path": str(root / candidate)}
+            result = {**result, "path": str(root / leaf)}
         return result
     finally:
         if temp_fd >= 0:
@@ -233,7 +231,7 @@ class _Rest:
     """REST routes; every one is a thin wrapper over ``handle_tool_call``."""
 
     def __init__(self) -> None:
-        self._tools = get_tool_definitions()
+        self._tools = _startos_tool_definitions()
         self._names = {t["name"] for t in self._tools}
         # A single worker thread keeps tool calls serialised like the MCP
         # handler (which runs them inline on the event loop) and keeps one
@@ -351,7 +349,7 @@ def _probe_default_bank() -> None:
 
 
 def _public_app() -> Starlette:
-    openapi = build_openapi(get_tool_definitions(), mnemosyne.__version__)
+    openapi = build_openapi(_startos_tool_definitions(), mnemosyne.__version__)
 
     async def healthz(request: Request) -> Response:
         try:
@@ -409,6 +407,7 @@ def build_app(host: str = "0.0.0.0", mcp_path: str = "/mcp"):
     # mcp_server imported the upstream dispatcher by value. Replace that shared
     # callback before constructing the MCP server; REST calls this same wrapper.
     mcp_server.handle_tool_call = handle_tool_call
+    mcp_server.get_tool_definitions = _startos_tool_definitions
 
     # Raises on a missing Host policy or auth setup: same fail-closed rules as
     # `mnemosyne mcp --transport streamable-http`.

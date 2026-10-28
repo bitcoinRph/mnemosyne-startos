@@ -157,6 +157,16 @@ def test_spoofed_author_is_rejected(client):
 def test_generic_tool_endpoint(client):
     listed = client.get("/api/v1/tools", headers=ALICE).json()["tools"]
     assert "mnemosyne_remember" in {t["name"] for t in listed}
+    by_name = {tool["name"]: tool for tool in listed}
+    export_path = by_name["mnemosyne_export"]["input_schema"]["properties"][
+        "output_path"
+    ]["description"]
+    import_path = by_name["mnemosyne_import"]["input_schema"]["properties"][
+        "input_path"
+    ]["description"]
+    for description in (export_path, import_path):
+        assert "flat filename" in description.lower()
+        assert "/tmp" not in description
 
     r = client.post(
         "/api/v1/tools/mnemosyne_remember",
@@ -173,6 +183,7 @@ def test_generic_tool_endpoint(client):
     "path",
     [
         "../escape.json",
+        "nested/export.json",
         "nested/../../escape.json",
         "/data/backups/absolute.json",
         "/data/mnemosyne/shared/mnemosyne.db",
@@ -188,14 +199,14 @@ def test_rest_export_rejects_paths_outside_backup_dir(client, path):
     assert "backup" in r.json()["error"].lower()
 
 
-def test_rest_export_resolves_relative_path_inside_backup_dir(client, backup_dir):
+def test_rest_export_resolves_flat_filename_inside_backup_dir(client, backup_dir):
     r = client.post(
         "/api/v1/tools/mnemosyne_export",
         headers=ALICE,
-        json={"output_path": "exports/rest.json"},
+        json={"output_path": "rest.json"},
     )
     assert r.status_code == 200, r.text
-    assert (Path(backup_dir) / "exports" / "rest.json").is_file()
+    assert (Path(backup_dir) / "rest.json").is_file()
 
 
 def test_mcp_handler_uses_same_backup_path_guard(backup_dir):
@@ -207,12 +218,12 @@ def test_mcp_handler_uses_same_backup_path_guard(backup_dir):
             "mnemosyne_import", {"input_path": "../outside.json"}
         )
 
-    source = Path(backup_dir) / "imports" / "mcp.json"
+    source = Path(backup_dir) / "mcp.json"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text('{"schema_version":"invalid-test"}', encoding="utf-8")
     with pytest.raises(Exception) as exc_info:
         mcp_server.handle_tool_call(
-            "mnemosyne_import", {"input_path": "imports/mcp.json", "dry_run": True}
+            "mnemosyne_import", {"input_path": "mcp.json", "dry_run": True}
         )
     assert "backup" not in str(exc_info.value).lower()
 
@@ -232,9 +243,7 @@ def test_whitespace_provider_cannot_bypass_file_import_guard():
     "tool,path_key",
     [("mnemosyne_export", "output_path"), ("mnemosyne_import", "input_path")],
 )
-def test_backup_guard_rejects_symlinked_components_and_targets(
-    backup_dir, tool, path_key
-):
+def test_backup_guard_rejects_symlinked_targets(backup_dir, tool, path_key):
     build_app(host="0.0.0.0")
     import mnemosyne.mcp_server as mcp_server
 
@@ -242,16 +251,12 @@ def test_backup_guard_rejects_symlinked_components_and_targets(
     root.mkdir(parents=True, exist_ok=True)
     outside = root.parent / "outside"
     outside.mkdir(exist_ok=True)
-    component = root / "linked-dir"
     target = root / "linked-file.json"
-    if not component.exists() and not component.is_symlink():
-        component.symlink_to(outside, target_is_directory=True)
     if not target.exists() and not target.is_symlink():
         target.symlink_to(outside / "file.json")
 
-    for path in ("linked-dir/file.json", "linked-file.json"):
-        with pytest.raises(ValueError, match="symlink"):
-            mcp_server.handle_tool_call(tool, {path_key: path})
+    with pytest.raises(ValueError, match="symlink"):
+        mcp_server.handle_tool_call(tool, {path_key: "linked-file.json"})
 
 
 def test_export_rejects_hard_link_target_without_overwriting_source(backup_dir):
@@ -279,7 +284,7 @@ def test_export_does_not_follow_target_swapped_to_symlink(
     from mnemosyne_startos import app
 
     root = Path(backup_dir)
-    target = root / "race" / "export.json"
+    target = root / "export.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     outside = root.parent / "outside-race-target"
     outside.write_text("outside-bytes", encoding="utf-8")
@@ -292,7 +297,7 @@ def test_export_does_not_follow_target_swapped_to_symlink(
 
     monkeypatch.setattr(app, "_upstream_handle_tool_call", swap_target_and_write)
     with pytest.raises(ValueError, match="symlink"):
-        app.handle_tool_call("mnemosyne_export", {"output_path": "race/export.json"})
+        app.handle_tool_call("mnemosyne_export", {"output_path": "export.json"})
     assert outside.read_text(encoding="utf-8") == "outside-bytes"
 
 

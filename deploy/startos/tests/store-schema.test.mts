@@ -1,10 +1,34 @@
 import assert from 'node:assert/strict'
-import { tokenStoreShape } from '../startos/fileModels/tokenStoreShape.ts'
+import {
+  parseTokenStoreJson,
+  tokenStoreShape,
+} from '../startos/fileModels/tokenStoreShape.ts'
 
 const accepted = tokenStoreShape.parse({
   tokens: { Alice: 'secret-1', bob: 'secret-2' },
 })
 assert.deepEqual(accepted.tokens, { Alice: 'secret-1', bob: 'secret-2' })
+
+const caseDistinct = tokenStoreShape.parse({
+  tokens: { Alice: 'secret-1', alice: 'secret-2' },
+})
+assert.deepEqual(caseDistinct.tokens, { Alice: 'secret-1', alice: 'secret-2' })
+
+const padded = tokenStoreShape.parse(
+  parseTokenStoreJson('{"tokens":{" Alice ":" secret-1 ","bob":" secret-2"}}'),
+)
+assert.deepEqual(padded.tokens, { Alice: 'secret-1', bob: 'secret-2' })
+
+assert.throws(
+  () => parseTokenStoreJson('{"tokens":{"alice":"one","alice":"two"}}'),
+  /duplicate/i,
+)
+
+assert.throws(() => parseTokenStoreJson('{'), /Invalid token store JSON/)
+assert.equal(
+  tokenStoreShape.safeParse(parseTokenStoreJson('{}')).success,
+  false,
+)
 
 const malformedStates = [
   {},
@@ -16,7 +40,7 @@ const malformedStates = [
   { tokens: { alice: '   ' } },
   { tokens: { alice: 'same', bob: 'same' } },
   { tokens: { alice: ' same ', bob: 'same' } },
-  { tokens: { Alice: 'one', alice: 'two' } },
+  { tokens: { alice: 'one', ' alice ': 'two' } },
 ] as const
 
 for (const malformed of malformedStates) {
@@ -27,4 +51,4 @@ for (const malformed of malformedStates) {
   )
 }
 
-console.log(`${malformedStates.length + 1} store schema contract cases passed`)
+console.log('token store contract tests passed')
