@@ -8,7 +8,11 @@
     "@start9labs/start-sdk": "3.1.1"
   },
   "devDependencies": {
-    "tsx": "4.23.15"
+    "tsx": "4.23.15",
+    "typescript": "6.0.3"
+  },
+  "allowScripts": {
+    "esbuild": true
   },
   "overrides": {
     "@start9labs/start-sdk": "$@start9labs/start-sdk"

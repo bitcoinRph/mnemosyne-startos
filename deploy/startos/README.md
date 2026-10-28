@@ -111,7 +111,7 @@ Two more routes exist on the same port and have no interface of their own. Both 
 
 | Route           | Purpose                                                                       |
 | --------------- | ----------------------------------------------------------------------------- |
-| `/healthz`      | `200 {"status":"ok","version":...}`, or `503 {"status":"unavailable","error":...}` |
+| `/healthz`      | `200 {"status":"ok","version":...}`, or a redacted `503 {"status":"unavailable"}` |
 | `/openapi.json` | OpenAPI document for the REST API                                             |
 
 REST routes. All of them need `Authorization: Bearer <agent token>`. The body of a call is the JSON arguments of the tool.
