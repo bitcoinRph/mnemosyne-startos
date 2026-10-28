@@ -32,4 +32,5 @@ run_*.sh
 *.s9pk
 deploy/startos/*
 !deploy/startos/server
+!deploy/startos/docker-entrypoint.sh
 deploy/startos/server/tests

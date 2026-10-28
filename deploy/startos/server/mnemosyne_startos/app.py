@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import errno
 import json
 import logging
+import os
+import secrets
 import sqlite3
+import stat
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Optional
 
 import anyio
@@ -23,7 +28,11 @@ from mnemosyne.mcp_server import (
     _build_streamable_http_app,
     _resolve_multi_tokens,
 )
-from mnemosyne.mcp_tools import get_tool_definitions, handle_tool_call
+import mnemosyne.mcp_server as mcp_server
+from mnemosyne.mcp_tools import (
+    get_tool_definitions,
+    handle_tool_call as _upstream_handle_tool_call,
+)
 
 from .openapi import build_openapi
 
@@ -34,6 +43,163 @@ _PUBLIC_PATHS = frozenset({"/healthz", "/openapi.json"})
 # Batch failures are the only structured ``status: error`` results the MCP
 # handler treats as errors; map them the same way.
 _BATCH_CLIENT_ERROR = "batch_validation_failed"
+
+
+def _reject_symlink(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(mode):
+        raise ValueError("backup path must not contain symlinked components or targets")
+
+
+def _backup_location(raw_path: Any) -> tuple[Path, Path]:
+    """Validate a caller path and return the configured root and relative path."""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("a relative backup path is required")
+    raw_path = raw_path.strip()
+    candidate = Path(raw_path)
+    if candidate.is_absolute() or any(part in {".", ".."} for part in raw_path.split("/")):
+        raise ValueError("backup path must be relative and must not contain traversal")
+
+    configured = os.environ.get("MNEMOSYNE_BACKUP_DIR", "").strip()
+    if not configured:
+        raise RuntimeError("MNEMOSYNE_BACKUP_DIR is required")
+    root = Path(configured)
+    if not root.is_absolute():
+        raise RuntimeError("MNEMOSYNE_BACKUP_DIR must be absolute")
+
+    # The environment is trusted configuration, but reject a symlinked backup
+    # root too so path checks cannot be redirected outside the persisted volume.
+    current = Path(root.anchor)
+    for part in root.parts[1:]:
+        current /= part
+        _reject_symlink(current)
+    root.mkdir(parents=True, exist_ok=True)
+
+    return root, candidate
+
+
+def _open_backup_parent(raw_path: Any, *, create: bool) -> tuple[Path, Path, int]:
+    """Open the target parent without following caller-controlled symlinks."""
+    root, candidate = _backup_location(raw_path)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent_fd = os.open(root, flags)
+    try:
+        for part in candidate.parts[:-1]:
+            try:
+                child_fd = os.open(part, flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise ValueError(
+                        "backup import path must name an existing regular file"
+                    ) from None
+                os.mkdir(part, mode=0o700, dir_fd=parent_fd)
+                child_fd = os.open(part, flags, dir_fd=parent_fd)
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    raise ValueError(
+                        "backup path must not contain symlinked components or targets"
+                    ) from None
+                raise
+            os.close(parent_fd)
+            parent_fd = child_fd
+        return root, candidate, parent_fd
+    except Exception:
+        os.close(parent_fd)
+        raise
+
+
+def _checked_leaf_stat(parent_fd: int, leaf: str, *, required: bool) -> os.stat_result | None:
+    try:
+        info = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        if required:
+            raise ValueError(
+                "backup import path must name an existing regular file"
+            ) from None
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError("backup path must not contain symlinked components or targets")
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("backup path must name a regular file")
+    if info.st_nlink != 1:
+        raise ValueError("backup path must not be a hard link")
+    return info
+
+
+def _safe_file_import(arguments: dict[str, Any]) -> dict[str, Any]:
+    root, candidate, parent_fd = _open_backup_parent(
+        arguments.get("input_path"), create=False
+    )
+    del root  # The open descriptors, not a re-resolved path, enforce confinement.
+    input_fd = -1
+    try:
+        leaf = candidate.name
+        _checked_leaf_stat(parent_fd, leaf, required=True)
+        input_fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        info = os.fstat(input_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("backup import path must be a single regular file")
+        secured = dict(arguments)
+        secured["input_path"] = f"/proc/self/fd/{input_fd}"
+        return _upstream_handle_tool_call("mnemosyne_import", secured)
+    finally:
+        if input_fd >= 0:
+            os.close(input_fd)
+        os.close(parent_fd)
+
+
+def _safe_file_export(arguments: dict[str, Any]) -> dict[str, Any]:
+    root, candidate, parent_fd = _open_backup_parent(
+        arguments.get("output_path"), create=True
+    )
+    temp_name = f".mnemosyne-export-{secrets.token_hex(16)}"
+    temp_fd = -1
+    try:
+        leaf = candidate.name
+        _checked_leaf_stat(parent_fd, leaf, required=False)
+        temp_fd = os.open(
+            temp_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        secured = dict(arguments)
+        secured["output_path"] = f"/proc/self/fd/{temp_fd}"
+        result = _upstream_handle_tool_call("mnemosyne_export", secured)
+        os.fsync(temp_fd)
+
+        # A target introduced while the export ran is never followed. Reject
+        # aliases, then atomically replace only the directory entry itself.
+        _checked_leaf_stat(parent_fd, leaf, required=False)
+        os.replace(temp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        temp_name = ""
+        if isinstance(result, dict) and result.get("path") == secured["output_path"]:
+            result = {**result, "path": str(root / candidate)}
+        return result
+    finally:
+        if temp_fd >= 0:
+            os.close(temp_fd)
+        if temp_name:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+        os.close(parent_fd)
+
+
+def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Shared StartOS policy seam used by both MCP and REST dispatch."""
+    if name == "mnemosyne_export":
+        return _safe_file_export(arguments)
+    if name == "mnemosyne_import":
+        provider = arguments.get("provider")
+        has_provider = isinstance(provider, str) and bool(provider.strip())
+        if not has_provider:
+            return _safe_file_import(arguments)
+    return _upstream_handle_tool_call(name, arguments)
 
 
 def _json(content: Any, status: int = 200) -> Response:
@@ -192,7 +358,7 @@ def _public_app() -> Starlette:
             await anyio.to_thread.run_sync(_probe_default_bank)
         except Exception as exc:  # noqa: BLE001 — any failure means unhealthy
             logger.warning("health check failed: %s", exc)
-            return _json({"status": "unavailable", "error": str(exc)}, 503)
+            return _json({"status": "unavailable"}, 503)
         return _json({"status": "ok", "version": mnemosyne.__version__})
 
     async def openapi_json(request: Request) -> Response:
@@ -239,6 +405,10 @@ def build_app(host: str = "0.0.0.0", mcp_path: str = "/mcp"):
             "MNEMOSYNE_MCP_TOKENS is unset or empty; refusing to start without "
             'at least one agent token (a JSON object like {"agent": "secret"}).'
         )
+
+    # mcp_server imported the upstream dispatcher by value. Replace that shared
+    # callback before constructing the MCP server; REST calls this same wrapper.
+    mcp_server.handle_tool_call = handle_tool_call
 
     # Raises on a missing Host policy or auth setup: same fail-closed rules as
     # `mnemosyne mcp --transport streamable-http`.

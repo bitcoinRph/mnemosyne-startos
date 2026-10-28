@@ -68,6 +68,7 @@ export const main = sdk.setupMain(async ({ effects }) => {
       env: {
         MNEMOSYNE_MCP_TOKENS: JSON.stringify(tokens),
         MNEMOSYNE_MCP_ALLOWED_HOSTS: allowedHosts.join(','),
+        MNEMOSYNE_BACKUP_DIR: '/data/backups',
       },
     },
     ready: {

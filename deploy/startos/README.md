@@ -199,13 +199,7 @@ The package has one check, `primary`, shown as "MCP and REST API". It probes `GE
 | failure inside the grace period       | The process is still starting. Wait. It is the normal state for the first seconds.            |
 | failure after the grace period        | The server is not listening, or `/healthz` returned 503                                       |
 
-The check requires a 2xx response from `/healthz`. A 503 is a fault, not a slow start. Its body names the cause in `error`. The usual cause is a SQLite error on the default bank database. Examples are a full disk, a wrong permission on `/data/mnemosyne`, or a corrupt file. The service log shows the same message. To read the body, run this command:
-
-```bash
-start-cli package attach mnemosyne -n mnemosyne-sub -- python -c "import urllib.request as u, urllib.error as e
-try: print(u.urlopen('http://127.0.0.1:8080/healthz').read())
-except e.HTTPError as x: print(x.code, x.read())"
-```
+The check requires a 2xx response from `/healthz`. A 503 is a fault, not a slow start. The public response is deliberately generic; the service log records the underlying exception. The usual cause is a SQLite error on the default bank database, such as a full disk, a wrong permission on `/data/mnemosyne`, or a corrupt file.
 
 A server that exits at once with code 2 prints the reason on stderr. The usual reason is an empty `MNEMOSYNE_MCP_TOKENS`.
 
@@ -225,6 +219,7 @@ Diagnosis of client errors:
 The strategy is a wholesale copy of both volumes with `Backups.ofVolumes('main', 'startos')`. No database dump runs, so the SQLite files are copied as files.
 
 - Included: every bank database, the shared surface store, media blobs, `/data/home`, `/data/backups`, and `store.json` with all agent tokens.
+- MCP and REST file imports/exports accept only relative paths below `/data/backups`; traversal, absolute paths, links, and non-regular files are rejected.
 - Excluded: the image and the embedding model. They come from the package, not from a volume.
 - After restore: nothing is required. Tokens come back with `store.json`, so every agent keeps its current secret and URL settings. If the restored server has other enabled addresses, an agent that uses a disabled address gets `421`. Enable the address again to fix it.
 

@@ -32,8 +32,17 @@ PY
 
 FROM python:3.12-slim
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /opt/venv /opt/venv
 COPY --from=build /opt/mnemosyne/fastembed /opt/mnemosyne/fastembed
+COPY --chmod=0755 deploy/startos/docker-entrypoint.sh /usr/local/bin/mnemosyne-startos-entrypoint
+
+RUN groupadd --gid 10001 mnemosyne \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent mnemosyne \
+    && install -d -o mnemosyne -g mnemosyne /data /data/backups /data/home /data/mnemosyne
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
@@ -47,5 +56,5 @@ ENV PATH=/opt/venv/bin:$PATH \
     HF_HUB_OFFLINE=1
 
 EXPOSE 8080
-ENTRYPOINT ["mnemosyne-startos-server"]
-CMD ["--host", "0.0.0.0", "--port", "8080"]
+ENTRYPOINT ["mnemosyne-startos-entrypoint"]
+CMD ["mnemosyne-startos-server", "--host", "0.0.0.0", "--port", "8080"]
