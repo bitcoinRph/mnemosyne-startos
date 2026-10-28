@@ -16,8 +16,9 @@ def test_runtime_image_contract_uses_entrypoint_and_keeps_data_root_owned():
     assert "install -d -o 0 -g 0 -m 0755 /data" in entrypoint
     assert "chown 0:0 /data" in entrypoint
     assert "chmod 0755 /data" in entrypoint
-    assert "chown -R 10001:10001 /data/backups /data/home /data/mnemosyne" in entrypoint
-    assert not re.search(r"^chown -R 10001:10001 /data$", entrypoint, re.MULTILINE)
+    assert "chown -R -h 10001:10001 /data/backups /data/home /data/mnemosyne" in entrypoint
+    assert not re.search(r"^chown -R (?!-h )10001:10001", entrypoint, re.MULTILINE)
+    assert not re.search(r"^chown -R -h 10001:10001 /data$", entrypoint, re.MULTILINE)
     assert 'exec gosu 10001:10001 "$@"' in entrypoint
     assert "MNEMOSYNE_BACKUP_DIR=/data/backups" in runtime
 
@@ -45,3 +46,14 @@ def test_store_init_only_seeds_an_absent_file_and_never_repairs_malformed_state(
     assert ".read().once()" in seed
     assert ".write(effects, { tokens: {} })" in seed
     assert ".merge(" not in seed
+
+
+def test_release_critical_contracts_are_ci_gates():
+    workflow = (ROOT.parents[1] / ".github/workflows/startos.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "package-contracts:" in workflow
+    assert "pytest tests/test_package_contracts.py" in workflow
+    assert "npm run test:contracts" in workflow
+    assert "npm run check" in workflow
+    assert "needs: [server-tests, package-contracts]" in workflow
